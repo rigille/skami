@@ -1,4 +1,4 @@
-use std::{io, thread, time::Duration};
+use std::{io, fmt, thread, time::Duration};
 use tui::{
     backend::CrosstermBackend,
     style::Style,
@@ -8,61 +8,144 @@ use tui::{
     Terminal
 };
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, poll, read},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, KeyCode, poll, read},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use hvm::language as lang;
+use im::Vector;
 
-#[derive(PartialEq)]
+#[derive(Clone)]
 struct State {
     mode: Mode,
-    input: String
+    input: String,
+    stack: Vector<StackEntry>,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone)]
+enum StackEntry {
+    Rule(lang::Rule),
+    Term(lang::Term),
+}
+
+#[derive(Clone, PartialEq)]
 enum Mode {
     Normal,
-    Input,
+    Insert,
     Exit,
 }
 
-fn update_input(mut input: String, event: Event) -> String {
-    match event {
-        Event::Key(key_event) =>
-            match key_event.code {
-                KeyCode::Char(c) => {
-                    input.push(c);
-                    input
-                },
-                KeyCode::Backspace => {
-                  input.pop();
-                  input
-                },
-                _ => input,
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Normal => "Mode::Normal",
+                Self::Insert => "Mode::Insert",
+                Self::Exit => "Mode::Exit",
             }
-        _ => input,
+        )
     }
 }
 
-fn update_state(st: State, event: Event) -> State {
-    if event == Event::Key(KeyCode::Esc.into()) { 
-        State {
-            mode: Mode::Exit,
-            ..st
+impl fmt::Display for StackEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Term(val) => val.to_string(),
+                Self::Rule(val) => val.to_string(),
+            }
+        )
+    }
+}
+
+fn normal_update(st: State, event: Event) -> State {
+    if let Event::Key(key_event) = event {
+        match key_event.code {
+            KeyCode::Char('i') =>
+                State { mode: Mode::Insert, ..st },
+            KeyCode::Char('q') =>
+                State { mode: Mode::Exit, ..st },
+            KeyCode::Char('+') => {
+                let mut stack = st.stack.clone();
+                let fst = stack.pop_back();
+                let snd = stack.pop_back();
+                let stack =
+                    match (fst, snd) {
+                        (Some(StackEntry::Term(val0)), Some(StackEntry::Term(val1))) => {
+                            let val0 = Box::new(val0);
+                            let val1 = Box::new(val1);
+                            stack.push_back(
+                                StackEntry::Term(lang::Term::Op2 {
+                                    oper: lang::Oper::Add,
+                                    val0,
+                                    val1,
+                                }));
+                            stack
+                        },
+                        _ => st.stack
+                    };
+                State { stack, ..st }
+            },
+            _ => st,
         }
     } else {
-        match st.mode {
-            Mode::Input => State {
-                input: update_input(st.input, event),
-                ..st
-            },
-            _ => st
-        }
+        st
     }
 }
 
-fn render_state(st: &State) -> impl Widget {
-    Paragraph::new(vec![Spans::from(Span::raw(st.input.clone()))])
+fn insert_update(st: State, event: Event) -> State {
+    if let Event::Key(key_event) = event {
+        match key_event.code {
+            KeyCode::Char(c) => {
+                let mut input = st.input;
+                input.push(c);
+                State { input, ..st }
+            },
+            KeyCode::Backspace => {
+                let mut input = st.input;
+                input.pop();
+                State { input, ..st }
+            },
+            KeyCode::Enter => {
+                if let Ok(term) = lang::read_term(&st.input) {
+                    let mut stack = st.stack.clone();
+                    stack.push_back(StackEntry::Term(*term));
+                    let mut input = st.input;
+                    input.clear();
+                    State { input, stack, ..st }
+                } else {
+                    st
+                }
+            },
+            _ => st,
+        }
+    } else {
+        st
+    }
+}
+
+fn update(st: State, event: Event) -> State {
+    match (&st.mode, event) {
+        (_, Event::Key(KeyEvent { code: KeyCode::Esc, .. })) =>
+            State { mode: Mode::Normal, ..st },
+        (Mode::Normal, _) => normal_update(st, event),
+        (Mode::Insert, _) => insert_update(st, event),
+        _ => st,
+    }
+}
+
+fn render(st: &State) -> impl Widget {
+    let mut v = Vec::new();
+    for term in &st.stack {
+        v.push(Spans::from(Span::raw(term.to_string())));
+    }
+    v.push(Spans::from(Span::raw(st.input.clone())));
+    v.push(Spans::from(Span::raw(st.mode.to_string())));
+    Paragraph::new(v)
 }
 
 
@@ -74,15 +157,15 @@ fn main() -> Result<(), io::Error> {
     let backend = CrosstermBackend::new(stdout);
 
     let mut terminal = Terminal::new(backend)?;
-    let mut st = State { mode: Mode::Input, input: String::new() };
+    let mut st = State { mode: Mode::Insert, input: String::from("test"), stack: Vector::new() };
 
     loop {
         if poll(Duration::from_millis(50))? {
             let event = read()?;
-            st = update_state(st, event);
+            st = update(st, event);
+            let widget = render(&st);
             terminal.draw(|f| {
                 let size = f.size();
-                let widget = render_state(&st);
                 f.render_widget(widget, size);
             })?;
             if st.mode == Mode::Exit {
