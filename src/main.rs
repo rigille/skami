@@ -65,30 +65,33 @@ impl fmt::Display for StackEntry {
 fn normal_update(st: State, event: Event) -> State {
     if let Event::Key(key_event) = event {
         match key_event.code {
-            KeyCode::Char('i') =>
-                State { mode: Mode::Insert, ..st },
-            KeyCode::Char('q') =>
-                State { mode: Mode::Exit, ..st },
-            KeyCode::Char('+') => {
-                let mut stack = st.stack.clone();
-                let fst = stack.pop_back();
-                let snd = stack.pop_back();
-                let stack =
-                    match (fst, snd) {
-                        (Some(StackEntry::Term(val0)), Some(StackEntry::Term(val1))) => {
-                            let val0 = Box::new(val0);
-                            let val1 = Box::new(val1);
-                            stack.push_back(
-                                StackEntry::Term(lang::Term::Op2 {
-                                    oper: lang::Oper::Add,
-                                    val0,
-                                    val1,
-                                }));
-                            stack
-                        },
-                        _ => st.stack
-                    };
-                State { stack, ..st }
+            KeyCode::Char(c) => {
+                match c {
+                    'i' =>
+                        State { mode: Mode::Insert, ..st },
+                    'q' =>
+                        State { mode: Mode::Exit, ..st },
+                    'a' => {
+                        let mut stack = st.stack.clone();
+                        let fst = stack.pop_back();
+                        let snd = stack.pop_back();
+                        let stack =
+                            match (fst, snd) {
+                                (Some(StackEntry::Term(func)), Some(StackEntry::Term(argm))) => {
+                                    let func = Box::new(func);
+                                    let argm = Box::new(argm);
+                                    stack.push_back(
+                                        StackEntry::Term(lang::Term::App {
+                                            func,
+                                            argm,
+                                        }));
+                                    stack
+                                },
+                                _ => st.stack
+                            };
+                        State { stack, ..st }},
+                    _ => st,
+                }
             },
             _ => st,
         }
@@ -157,8 +160,13 @@ fn main() -> Result<(), io::Error> {
     let backend = CrosstermBackend::new(stdout);
 
     let mut terminal = Terminal::new(backend)?;
-    let mut st = State { mode: Mode::Insert, input: String::from("test"), stack: Vector::new() };
+    let mut st = State { mode: Mode::Insert, input: String::new(), stack: Vector::new() };
 
+    let widget = render(&st);
+    terminal.draw(|f| {
+        let size = f.size();
+        f.render_widget(widget, size);
+    })?;
     loop {
         if poll(Duration::from_millis(50))? {
             let event = read()?;
